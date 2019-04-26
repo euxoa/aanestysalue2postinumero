@@ -2,68 +2,35 @@ library(dplyr)
 library(ggplot2)
 library(rstan)
 
-# Correlate zip code areas and voting districts by modeling their intersections. 
-#
-# Suppose Z_i is a variable defined for zip codes, and V_j is a variable relaed to 
-# voting districts. 
-# 
-# Let the intersections be X_ij. For each X_ij, we have Z_i (common with other X_ij), 
-# and V_j (common to other X_ij). Suppose there is measurement error in both, and
-# let the underlying things be theta_i and psi_j. Now if theta and psi correlate,
-# then Z leaks information from X and vice versa. 
-#
-# The dependency structure is:
-# X - theta - psi - Z
-#
-# Further, the correlation of theta and psi is higher than the observable
-# correlation of X and Z. 
-#
-# A typical setup in the voting context is that X and Z are counts, contrasted to a total, 
-# so that at its simplest theta ~ Beta(X, X_total), and psi ~ Beta(Z, Z_total), with
-# 0<theta<1 and 0<beta<1. We may model the correlation of theta and beta as linear in the logit space. 
-#
-# In the case of areas with counts or proportions described above, the counts are not 
-# for the intersection ij but for i and j. The beta posterior is then for the whole areas. 
-# Intersections are sub-areas with their weights (proportion of total) at least approximately known. 
-# Posterior for an intersection is more uncertain than for the whole:
-#
-# X - theta_i - theta_ij - psi_ij - psi_j - Z
-# It is unclear whether theta_ij and psi_ij or their variance around theta_i and psi_j 
-# are identifiable at all, so maybe skip that.
-# The alternative is to assume theta_i and theta_ij etc. identical,
-# which would then underestimate the real correlation between psi and theta.
-#
-# So:
-# - [logit theta_ij, logit psi_ij] ~ multinormal(mean_ij, C)
-# - theta_i = \sum_j wx_ij theta_ij (hard constraint)
-# - psi_j = \sum_i wz_ij psi_ij
-# - Z, X ~ Binom
- 
-pres_vaal <- readRDS("presidentinvaalien.aanet.rds")
+aanet_puolueittain <- readRDS(file = "data/EKV2019_ehdokkaat.rds") %>% 
+  filter(aluejako == "äänestysalue") %>% 
+  rename(aanestysalue.nro = alue) %>%
+  select(-puolue) %>% rename(puolue = puolue_lyhenne_alkuperainen) %>%
+  group_by(vaalipiiri, kunta, aanestysalue.nro, puolue) %>%
+  summarise(aania = sum(aanet_yhteensa))
 
-voting <- pres_vaal %>% group_by(kunta, alue) %>% summarise(tot_aania=sum(aania)) %>% ungroup %>%
-  left_join(pres_vaal %>% filter(ehdokas=="Haavisto")) %>% 
+voting <- aanet_puolueittain %>% 
+  group_by(vaalipiiri, kunta, aanestysalue.nro) %>% summarise(tot_aania=sum(aania)) %>% ungroup %>%
+  left_join(aanet_puolueittain %>% filter(puolue=="PS")) %>% 
   filter(tot_aania>0) %>%
-  mutate(aanestysalue=as.factor(paste(kunta, alue)))
+  mutate(aanestysalue=paste(kunta, aanestysalue.nro))
 
-aa_levels <- levels(voting$aanestysalue)
+paavo <- readRDS("map_and_names/paavodata.rds")$data %>% tbl_df()
 
-demography <- readRDS("paavo.2018.rds") %>% select(postinumero, he_vakiy, ko_perus) %>%
-  filter(!is.na(he_vakiy) & !is.na(ko_perus)) %>%
-  mutate(postinumero = as.factor(postinumero))
+demography <- paavo %>% filter(vuosi==2019) %>% select(postinumero=pono, he_vakiy, ko_perus) %>%
+  filter(!is.na(he_vakiy) & !is.na(ko_perus)) 
 
-pnro_levels <- levels(demography$postinumero)
-
-intersections <- readRDS("map.pono.aanestysalue.rds") %>% 
-  select(postinumero, aanestysalue.nro, kunta, n=rakennukset.aanestysalue.pono) %>% 
-  mutate(postinumero=factor(postinumero, pnro_levels),
-         aanestysalue=factor(paste(kunta, aanestysalue.nro), aa_levels), 
-         i = as.integer(postinumero),
-         j = as.integer(aanestysalue)) %>%
-  filter(!is.na(postinumero) & !is.na(aanestysalue)) %>%
-  group_by(postinumero) %>% mutate(wi = n/sum(n)) %>% ungroup() %>%
-  group_by(aanestysalue.nro, kunta) %>% mutate(wj = n/sum(n)) %>% ungroup() 
-
+intersections <- readRDS("data/aanestysalue2postinumero.rds") %>% 
+  select(postinumero, aanestysalue.nro, kunta, 
+         n = rakennukset.aanestysalue.pono, 
+         wi = w.aanestysalue2pono, 
+         wj = w.pono2aanestysalue) %>% 
+  mutate(aanestysalue = paste(kunta, aanestysalue.nro),
+         aanestysalue = as.factor(aanestysalue),
+         postinumero = as.factor(postinumero),
+         i = as.numeric(aanestysalue),
+         j = as.numeric(postinumero)) 
+  
 intersections %>% group_by(i) %>% summarise(swi=sum(wi)) %>% filter(swi<.99999 | swi>1)
 intersections %>% group_by(j) %>% summarise(swj=sum(wj)) %>% filter(swj<.99999 | swj>1)
 
@@ -78,19 +45,45 @@ Wb <- Matrix::sparseMatrix(i=intersections$j, j=1:nrow(intersections), x=interse
 weight_error <- sum((as.numeric(Wb %*% rep(1, dim(Wb)[2]))-1)**2); stopifnot(weight_error<1.0e-8)
 Wb_parts <- extract_sparse_parts(Wb)
 
+margins <- intersections %>% select(aanestysalue, postinumero) %>% sapply(levels)
 
-d <- list(Na=nrow(demography), Nb=nrow(voting), N=nrow(intersections),
-               parent_a = intersections$i,
-               parent_b = intersections$j,
-               wa = intersections$wi,
-               Wa_w = Wa_parts$w, Wa_v = Wa_parts$v, Wa_u = Wa_parts$u,
-               wb = intersections$wj,
-               a_tot = demography$he_vakiy,
-               a_count = demography$ko_perus,
-               b_tot = voting$tot_aania,
-               b_count = voting$aania)
+i.voting <- intersections %>% left_join(voting) %>% select(i, names(voting)) %>% unique %>% arrange(i)
+j.demography <- intersections %>% left_join(demography) %>% select(j, names(demography)) %>% unique %>% arrange(j)
+
+# Missing data in the counts is treated as zero. I guess that's kind of ok,
+# for voting that is probably the real situation, and for demography binomials
+# with zero counts are treated as missing evidence.
+na20 <- function(x) ifelse(is.na(x), 0, x)
+
+# But there are districts with missing puolue and zero votes for the party, although
+# the total number of votes is >1000!
+# Make the evidence zero for these, for in these cases there has been no candidates.
+fucked_votes <- with(i.voting, is.na(puolue) | is.na(aania) | is.na(tot_aania))
+i.voting$aania[fucked_votes] <- 0
+i.voting$tot_aania[fucked_votes] <- 0
+
+intersections$b_groups <- as.integer(factor(intersections %>% left_join(voting) %>% {.$vaalipiiri}, exclude=c()))
+
+d <- list(Na=nrow(j.demography), Nb=nrow(i.voting), N=nrow(intersections),
+               Wa_w = Wb_parts$w, Wa_v = Wb_parts$v, Wa_u = Wb_parts$u,
+               Wb_w = Wa_parts$w, Wb_v = Wa_parts$v, Wb_u = Wa_parts$u,
+               a_tot = j.demography$he_vakiy %>% na20,
+               a_count = j.demography$ko_perus %>% na20,
+               b_tot = i.voting$tot_aania %>% na20,
+               b_count = i.voting$aania %>% na20, 
+               Nb_groups = max(intersections$b_groups),
+               b_groups = intersections$b_groups)
 m <- stan_model("intersections.stan")
 fit <- sampling(m, data = d, chains=1, iter=500)
+traceplot(fit, c("theta_mu", "theta_sigma", "psi_mu", "psi_sigma", "psi_mu_sigma", "a"))
 
+j.demography %>% mutate(he_vakiy = na20(he_vakiy), ko_perus=na20(ko_perus)) %>% ggplot(aes(x=he_vakiy, y=ko_perus)) + geom_point() + scale_x_log10() + scale_y_log10()
+i.voting %>% mutate(tot_aania = na20(tot_aania), aania=na20(aania)) %>% ggplot(aes(x=tot_aania, y=aania, color=vaalipiiri)) + geom_point() + facet_wrap(~vaalipiiri) + scale_x_log10() + scale_y_log10()
 
-                             
+# TODO
+# - tyhjät vaalipiirit pois
+# - vaalipiirikohtainen offset koska ehdokasasettelu
+
+theta <- apply(extract(fit, "theta")[[1]], 2, mean)
+psi <- apply(extract(fit, "psi")[[1]], 2, mean)
+plot(theta, psi, pch=".")

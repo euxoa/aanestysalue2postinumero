@@ -1,13 +1,16 @@
+library(readr)
+library(dplyr)
+
 ## Hae rakennustiedot
 
 print("Lataa rakennusdata...")
 
-"data/suomi_osoitteet_2019-02-19.zip"
-download.file("https://www.avoindata.fi/data/dataset/cf9208dc-63a9-44a2-9312-bbd2c3952596/resource/d265962a-9f12-4152-8914-cca63c0f1e44/download/suomi_osoitteet_2019-02-15.zip",
-              "data/suomi_osoitteet_2019-02-19.zip")
+#"data/suomi_osoitteet_2019-02-19.zip"
+#download.file("https://www.avoindata.fi/data/dataset/cf9208dc-63a9-44a2-9312-bbd2c3952596/resource/d265962a-9f12-4152-8914-cca63c0f1e44/download/suomi_osoitteet_2019-02-15.zip",
+#              "data/suomi_osoitteet_2019-02-19.zip")
 
 rakennukset <-
-  read_delim("data/suomi_osoitteet_2019-02-19.zip", delim = ";", trim_ws = TRUE, col_types = "ccciiicccccccccc",
+  read_delim("data/Suomi_osoitteet_2019-02-15.OPT", delim = ";", trim_ws = TRUE, col_types = "ccciiicccccccccc",
     col_names = c(
       "rakennustunnus",
       "kunta",
